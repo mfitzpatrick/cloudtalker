@@ -5,10 +5,7 @@ import ssl
 import json
 import os
 import time
-try:
-    import thread
-except ImportError:
-    import _thread as thread
+import threading
 
 # BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -41,17 +38,56 @@ class upload():
             "\"trigger\":\"%s\"}" %
             (trigger_time, trigger_type))
 
-class cloudtalker():
+class state():
     def __init__(self):
+        self.lock = threading.RLock()
+        self.state = {
+            "id": 0,
+            "heartbeat_period": 10
+        }
+
+    def __getitem__(self, arg):
+        """
+        Standard method. Allows class to be called with square brackets.
+        Returns value for given key argument
+        i.e. state["id"] returns self.state["id"]
+        """
+        with self.lock:
+            return self.state[arg]
+
+    def process(self, input):
+        """
+        Process input JSON data and store in internal state dict
+        """
+        with self.lock:
+            # json.loads returns a python dict object
+            data = json.loads(input)
+            # add item to internal dict if it already exists
+            for k, v in data.items():
+                if k in self.state:
+                    self.state[k] = v
+
+    def toJSON(self, addDict=None):
+        """
+        Return contents of internal state dict as JSON string
+        """
+        with self.lock:
+            serialisedState = self.state
+            if addDict:
+                """Append addDict to state before serialising"""
+                serialisedState = self.state.copy()
+                serialisedState.update(addDict)
+            return json.dumps(serialisedState, sort_keys=True)
+
+class cloudtalker():
+    def __init__(self, state=state()):
         self.isConnected = False
+        self.state = state
 
     def on_message(self, ws, message):
         print(message)
-        self.send("{\"type\":\"state\", \"id\":2005, \"heartbeat_period\":55}")
-        ## .loads returns a python dict object
-        data = json.loads(message)
-        for k,v in data.items():
-            print("%s:%s" % (k, v)) # shows name and properties
+        self.state.process(message)
+        self.send(self.state.toJSON(addDict={"type":"state"}))
 
     def on_error(self, ws, error):
         print(error)
@@ -60,13 +96,15 @@ class cloudtalker():
         print("### closed ###")
 
     def on_open(self, ws):
-        def run(*args):
+        def run():
+            """Check server for state sync every 10 heartbeats"""
             while True:
-                print("state update")
-                ws.send("{\"type\":\"state\", \"id\":2005, \"heartbeat_period\":10}")
-                time.sleep(55 * 3)
+                print("state update (heartbeat period %s)" % self.state["heartbeat_period"])
+                self.send(self.state.toJSON(addDict={"type":"state"}))
+                time.sleep(self.state["heartbeat_period"] * 10)
         print("starting thread")
-        thread.start_new_thread(run, ())
+        t = threading.Thread(target=run)
+        t.start()
         print("thread started")
 
     def send(self, data, isText=True):
@@ -112,14 +150,15 @@ if __name__ == "__main__":
 
     ctalker = cloudtalker()
     if args.filename:
-        def uploadTest(*threadargs):
+        def uploadTest():
             upl = upload(ctalker)
             time.sleep(5)
             while not ctalker.isConnected:
                 print("uploadTest: waiting for connection...")
                 time.sleep(10)
             upl.uploadOneFile(args.filename, isMotionTriggered=True)
-        thread.start_new_thread(uploadTest, ())
+        t = threading.Thread(target=uploadTest)
+        t.start()
     ctalker.connect(args.endpoint, args.cert, args.key)
     print("cloudConnect exited")
 
