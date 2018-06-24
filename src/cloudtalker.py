@@ -2,14 +2,14 @@
 
 import websocket
 import ssl
+import socket
 import json
 import os
 import sys
 import time
+import datetime
 import threading
 import queue
-
-# BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def readFileChunks(f, chunk_size=1024):
     """
@@ -26,24 +26,34 @@ class upload(threading.Thread):
         self.ctalker = ctalker
         self.shouldStop = threading.Event()
         self.inq = queue.Queue()
+        self.current_captype = None
+        self.current_capts = None
+        self.current_segno = None
 
-    def uploadOneFile(self, fpath, isMotionTriggered=False):
-        trigger_time = os.path.getmtime(fpath) #use file last-modified timestamp
-        trigger_type = "pir" if isMotionTriggered else "request"
+    def init_capture(self):
         self.ctalker.send("{\"type\":\"capture_start\",\"trigger_timestamp\":%d,"
-            "\"trigger\":\"%s\"}" %
-            (trigger_time, trigger_type))
+            "\"trigger\":\"%s\"}" % (self.current_capts, self.current_captype))
+
+    def upload_one_file(self, fpath):
         self.ctalker.send("{\"type\":\"capture_segment\",\"trigger_timestamp\":%d,"
-            "\"trigger\":\"%s\",\"seg_no\":0}" %
-            (trigger_time, trigger_type))
+            "\"trigger\":\"%s\",\"seg_no\":%d}" %
+            (self.current_capts, self.current_captype, self.current_segno))
         with open(fpath, "rb") as f:
+            print("uploading file now...")
             for data in readFileChunks(f, chunk_size=1300):
                 self.ctalker.send(data, isText=False)
+            print("file upload completed")
+
+    def end_capture(self):
         self.ctalker.send("{\"type\":\"capture_end\",\"trigger_timestamp\":%d,"
-            "\"trigger\":\"%s\"}" %
-            (trigger_time, trigger_type))
+            "\"trigger\":\"%s\"}" % (self.current_capts, self.current_captype))
+        #reset variables for later usage
+        self.current_captype = self.current_capts = self.current_segno = None
 
     def join(self, timeout=None):
+        """
+        Thread join. Stop thread running.
+        """
         self.shouldStop.set()
         self.inq.join()
         super(upload, self).join()
@@ -51,48 +61,146 @@ class upload(threading.Thread):
     def run(self):
         while not self.shouldStop.isSet():
             try:
-                fobj = self.inq.get(timeout=5)
-                print("uploading file", fobj)
-                self.uploadOneFile(fobj[0], fobj[1])
+                #file data dict
+                fdata = self.inq.get(timeout=5)
+                if fdata["path"] is not None:
+                    print("uploading file", fdata["path"])
+                    if self.current_captype is not None:
+                        #There may be a capture currently running. Since this file doesn't
+                        #match this capture, send end_capture so the server is sync'd
+                        self.end_capture()
+                    #store so we can later send the capture_end message
+                    self.current_captype = "pir" if fdata["type"] == "pir" else "request"
+                    self.current_capts = fdata["ts"]
+                    self.current_segno = fdata["segno"]
+                    #upload file and finish
+                    if self.current_segno == 0:
+                        self.init_capture()
+                    self.upload_one_file(fdata["path"])
+                elif fdata["end_capture"] is not None:
+                    self.end_capture()
                 self.inq.task_done()
             except queue.Empty:
                 pass #continue through loop and wait again if necessary
 
-    def addFile(self, fpath, isMotionTriggered):
+    def inspect_file(self, fpath, isMotionTriggered):
+        self.current_captype = "pir" if isMotionTriggered else "cap"
+        self.current_capts = os.path.getmtime(fpath) #use file last-modified timestamp
+        self.current_segno = 0
+
+    def parse_filename(self, fpath):
+        """
+        Attempt to parse filename to get capture type, capture timestamp, and segment num.
+        FMT: <pir|cap>.<utc_ts>.<segno>.mp4
+        Returns: Tuple ("pir"|"cap", <utc_ts>, <segno>) or None on error
+        """
+        fname = os.path.basename(fpath)
+        if fname == "":
+            return None
+        parts = fname.split(".") #split on dot character
+        print("parts are:", parts)
+        if len(parts) >= 3 and (parts[0] == "pir" or parts[0] == "cap"):
+            ts = int(parts[1])
+            if ts == 0: #conversion likely failed
+                return None
+            segno = None
+            try:
+                segno = int(parts[2])
+            except:
+                return None
+            return (parts[0], ts, segno)
+
+    def add_file(self, fpath):
         """
         Add one file to be uploaded to the server.
         This function may be called from any thread
         """
-        self.inq.put((fpath, isMotionTriggered))
-        print("upload module accepted file", fpath)
+        if not os.path.isfile(fpath):
+            print("cloudtalker: cannot find file", fpath)
+            return None
+        #try to parse filename
+        parsed = self.parse_filename(fpath)
+        print("after parsing:", parsed)
+        if parsed is not None:
+            fdata = {
+                "path": fpath,
+                "type": parsed[0],
+                "ts": parsed[1],
+                "segno": parsed[2],
+                "end_capture": None,
+            }
+            self.inq.put(fdata)
+            print("upload module accepted file", fpath)
+
+    def add_capture_end(self):
+        """
+        Indicate that no further segment files will be sent for the current capture.
+        This concludes the capture upload to the server.
+        """
+        fdata = {
+            "path": None,
+            "end_capture": True,
+        }
+        self.inq.put(fdata)
 
 class motionUploadManager(threading.Thread):
-    def __init__(self, upload, motion_file_list):
+    def __init__(self, upload, motion_file_list=None, insock=None):
         super(motionUploadManager, self).__init__()
         self.upload = upload
         self.motion_file_list = motion_file_list
-        self.isArmed = threading.Event()
+        self.insock = insock
+        self.isarmed = threading.Event()
 
     def arm(self):
-        self.isArmed.set()
+        self.isarmed.set()
+        #TODO: report armed-state and capture request state to picamera
+        #over UNIX socket with JSON data encoding.
 
     def disarm(self):
-        self.isArmed.clear()
+        self.isarmed.clear()
 
-    def readAndUpload(self, f):
+    def listensock(self):
+        """
+        Open a listening UNIX socket and wait for a connection. Clients can send JSON
+        data in the correct format indicating a number of segment files.
+        When the connection is closed, the capture is deemed concluded.
+        """
+        svr = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        svr.bind(self.insock)
+        while True:
+            svr.listen(1)
+            conn, addr = svr.accept()
+            while True:
+                data = conn.recv(1024)
+                if data:
+                    print("socket listener json", data.decode("utf-8"))
+                    #parse and inspect JSON
+                    js = json.loads(data.decode('utf-8'))
+                    if "segment" in js:
+                        self.upload.add_file(js["segment"])
+                else:
+                    break
+            print("recv data is None, close conn...")
+            conn.close()
+            self.upload.add_capture_end()
+
+    def read_and_upload(self, f):
         for fpath in f:
             fpath = fpath.strip()
             # forward the file to the server if we are armed
-            if self.isArmed.is_set() and os.path.isfile(fpath):
-                self.upload.addFile(fpath, True)
+            if self.isarmed.is_set():
+                self.upload.add_file(fpath)
 
     def run(self):
         print("motion upl mgr running")
         if self.motion_file_list == "-":
             # use stdin instead of a named file
             return readAndUpload(sys.stdin)
-        with open(self.motion_file_list, 'r') as f:
-            self.readAndUpload(f)
+        elif self.insock is not None:
+            return self.listensock()
+        elif self.motion_file_list is not None:
+            with open(self.motion_file_list, 'r') as f:
+                self.read_and_upload(f)
         print("motionUploadManager has exited!")
 
 
@@ -178,12 +286,16 @@ class state():
             return json.dumps(serialisedState, sort_keys=True)
 
 class cloudtalker():
-    def __init__(self, motion_file_list=None, state=state()):
+    def __init__(self, motion_file_list=None, insock=None, state=state()):
         self.state = state
         self.upload = upload(ctalker=self)
         if motion_file_list:
             print("start motion upl mgr", motion_file_list)
-            self.motion_upload_mgr = motionUploadManager(self.upload, motion_file_list)
+            self.motion_upload_mgr = motionUploadManager(self.upload, motion_file_list=motion_file_list)
+            self.motion_upload_mgr.start()
+        elif insock:
+            print("start motion upl mgr", insock)
+            self.motion_upload_mgr = motionUploadManager(self.upload, insock=insock)
             self.motion_upload_mgr.start()
         else:
             self.motion_upload_mgr = None
@@ -238,13 +350,15 @@ class cloudtalker():
         """
         Wrap internal websocket-client data send
         """
+        if isText:
+            print("WebSocket send:", data)
         self.ws.send(data, opcode=websocket.ABNF.OPCODE_TEXT if isText else websocket.ABNF.OPCODE_BINARY)
 
     def sendFile(self, fpath, isMotionTriggered):
         """
         Upload specified file to server.
         """
-        self.upload.addFile(fpath, isMotionTriggered)
+        self.upload.add_file(fpath)
 
     def connect(self, endpoint, cert, key):
         websocket.enableTrace(True)
@@ -272,6 +386,7 @@ if __name__ == "__main__":
             help="Specify a custom server endpoint")
         parser.add_argument('--motion_file_list', default=None,
             help="File containing the list of files to upload (as motion-detected files)")
+        parser.add_argument('--input_sock', default=None, help="Input socket for reporting capture files")
         parser.add_argument('--upload_one_file', help="Video file name to upload (intended for testing)")
         return parser.parse_args()
 
@@ -281,7 +396,7 @@ if __name__ == "__main__":
     print(os.path.dirname(os.path.realpath(__file__)))
     print(os.getcwd())
 
-    with cloudtalker(args.motion_file_list) as ctalker:
+    with cloudtalker(motion_file_list=args.motion_file_list, insock=args.input_sock) as ctalker:
         if args.upload_one_file:
             # this will upload a file when possible
             ctalker.sendFile(args.upload_one_file, True)
