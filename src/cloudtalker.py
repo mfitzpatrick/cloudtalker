@@ -144,20 +144,50 @@ class upload(threading.Thread):
         self.inq.put(fdata)
 
 class motionUploadManager(threading.Thread):
-    def __init__(self, upload, motion_file_list=None, insock=None):
+    """
+    Manages the video file uploader by listening on input sockets and forwarding
+    received video capture files to the uploading thread.
+    Also manages the armed-state of the camera (and reports the armed-state to the
+    video capture process via another socket).
+    """
+    def __init__(self, upload, motion_file_list=None, insock=None, cmdsock=None):
         super(motionUploadManager, self).__init__()
         self.upload = upload
         self.motion_file_list = motion_file_list
         self.insock = insock
         self.isarmed = threading.Event()
+        self.cmdsock = None
+        if cmdsock:
+            #open new unix dgram socket for sending commands
+            self.cmdsock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            self.cmdsock.connect(cmdsock)
+
+    def __deinit__(self):
+        if self.cmdsock:
+            self.cmdsock.close()
 
     def arm(self):
+        """
+        Camera is armed and can receive motion-triggered videos.
+        """
         self.isarmed.set()
-        #TODO: report armed-state and capture request state to picamera
-        #over UNIX socket with JSON data encoding.
+        if self.cmdsock:
+            self.cmdsock.send('{"command":"arm"}'.encode())
 
     def disarm(self):
+        """
+        Camera is disarmed and should reject all motion-triggered videos.
+        """
         self.isarmed.clear()
+        if self.cmdsock:
+            self.cmdsock.send('{"command":"disarm"}'.encode())
+
+    def capture(self):
+        """
+        User has requested a single video capture regardless of whether there is motion.
+        """
+        if self.cmdsock:
+            self.cmdsock.send('{"command":"capture"}'.encode())
 
     def listensock(self):
         """
@@ -192,6 +222,9 @@ class motionUploadManager(threading.Thread):
                 self.upload.add_file(fpath)
 
     def run(self):
+        """
+        Choose input path: UNIX socket (preferred), sys.stdin, or named pipe.
+        """
         print("motion upl mgr running")
         if self.motion_file_list == "-":
             # use stdin instead of a named file
@@ -286,16 +319,22 @@ class state():
             return json.dumps(serialisedState, sort_keys=True)
 
 class cloudtalker():
-    def __init__(self, motion_file_list=None, insock=None, state=state()):
+    """
+    Manages WebSocket communication with cloud.
+    Links each separate module together: state receiving, state processing, file uploading.
+    Regularly heartbeats with server to ensure state is correct and up to date.
+    """
+    def __init__(self, motion_file_list=None, insock=None, cmdsock=None, state=state()):
         self.state = state
         self.upload = upload(ctalker=self)
         if motion_file_list:
             print("start motion upl mgr", motion_file_list)
-            self.motion_upload_mgr = motionUploadManager(self.upload, motion_file_list=motion_file_list)
+            self.motion_upload_mgr = motionUploadManager(self.upload,
+                motion_file_list=motion_file_list, cmdsock=cmdsock)
             self.motion_upload_mgr.start()
         elif insock:
             print("start motion upl mgr", insock)
-            self.motion_upload_mgr = motionUploadManager(self.upload, insock=insock)
+            self.motion_upload_mgr = motionUploadManager(self.upload, insock=insock, cmdsock=cmdsock)
             self.motion_upload_mgr.start()
         else:
             self.motion_upload_mgr = None
@@ -325,6 +364,9 @@ class cloudtalker():
                     self.motion_upload_mgr.arm()
                 else:
                     self.motion_upload_mgr.disarm()
+        if self.state.getUpdateTimeWithKey("capture_asap") == updateTime:
+            if self.motion_upload_mgr:
+                self.motion_upload_mgr.capture()
 
     def on_error(self, ws, error):
         print(error)
@@ -386,8 +428,10 @@ if __name__ == "__main__":
             help="Specify a custom server endpoint")
         parser.add_argument('--motion_file_list', default=None,
             help="File containing the list of files to upload (as motion-detected files)")
-        parser.add_argument('--input_sock', default=None, help="Input socket for reporting capture files")
-        parser.add_argument('--upload_one_file', help="Video file name to upload (intended for testing)")
+        parser.add_argument('--input_sock', default=None,
+            help="Input unix stream socket for reporting capture files")
+        parser.add_argument('--cam_sock', default=None,
+            help="Unix dgram socket to send commands to (i.e. arm|disarm|capture, etc.)")
         return parser.parse_args()
 
     print("app started now")
@@ -396,10 +440,8 @@ if __name__ == "__main__":
     print(os.path.dirname(os.path.realpath(__file__)))
     print(os.getcwd())
 
-    with cloudtalker(motion_file_list=args.motion_file_list, insock=args.input_sock) as ctalker:
-        if args.upload_one_file:
-            # this will upload a file when possible
-            ctalker.sendFile(args.upload_one_file, True)
+    with cloudtalker(motion_file_list=args.motion_file_list,
+            insock=args.input_sock, cmdsock=args.cam_sock) as ctalker:
         ctalker.connect(args.endpoint, args.cert, args.key)
         print("cloudConnect exited")
 
