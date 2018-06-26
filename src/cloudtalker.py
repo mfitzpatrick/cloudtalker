@@ -65,9 +65,10 @@ class upload(threading.Thread):
                 fdata = self.inq.get(timeout=5)
                 if fdata["path"] is not None:
                     print("uploading file", fdata["path"])
-                    if self.current_captype is not None:
+                    if self.current_capts is not None and self.current_capts != fdata["ts"]:
                         #There may be a capture currently running. Since this file doesn't
                         #match this capture, send end_capture so the server is sync'd
+                        print("out of sync video sent!", self.current_capts, fdata["ts"])
                         self.end_capture()
                     #store so we can later send the capture_end message
                     self.current_captype = "pir" if fdata["type"] == "pir" else "request"
