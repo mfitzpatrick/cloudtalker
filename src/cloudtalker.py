@@ -20,6 +20,17 @@ def readFileChunks(f, chunk_size=1024):
         if data: yield data
         else: return #no more data in file
 
+def toInt(str):
+    """
+    Convert a string to an Integer and return it
+    If not possible, return None.
+    """
+    try:
+        port = int(str)
+        return port
+    except ValueError:
+        return None
+
 class upload(threading.Thread):
     def __init__(self, ctalker):
         super(upload, self).__init__()
@@ -196,8 +207,14 @@ class motionUploadManager(threading.Thread):
         data in the correct format indicating a number of segment files.
         When the connection is closed, the capture is deemed concluded.
         """
-        svr = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        svr.bind(self.insock)
+        svr = None
+        port = toInt(self.insock)
+        if port is not None: #insock is actually a port number
+            svr = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            svr.bind(("", port))
+        else:
+            svr = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            svr.bind(self.insock)
         while True:
             svr.listen(1)
             conn, addr = svr.accept()
