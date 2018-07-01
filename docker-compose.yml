@@ -3,3 +3,9 @@ version: "2"
 services:
   python:
     build: .
+    ports:
+     - "9000:9000"
+# if you wish to use unix sockets for communication, create your sockets in the
+# comm directory and uncomment these lines to share it
+#    volumes:
+#     - ./comm:/comm

@@ -31,6 +31,20 @@ def toInt(str):
     except ValueError:
         return None
 
+def split_inet_addr(addr):
+    """
+    Split INet addr into IP and port parts
+    return (ip, port) tuple
+    """
+    split = addr.split(":")
+    if len(split) < 2:
+        return None
+    ip = split[0]
+    port = toInt(split[1])
+    if port is None:
+        return None
+    return (ip, port)
+
 class upload(threading.Thread):
     def __init__(self, ctalker):
         super(upload, self).__init__()
@@ -162,21 +176,56 @@ class motionUploadManager(threading.Thread):
     Also manages the armed-state of the camera (and reports the armed-state to the
     video capture process via another socket).
     """
-    def __init__(self, upload, motion_file_list=None, insock=None, cmdsock=None):
+    def __init__(self, upload=None, motion_file_list=None, insock=None, cmdsock=None,
+            inport=None, cmdaddr=None):
         super(motionUploadManager, self).__init__()
         self.upload = upload
         self.motion_file_list = motion_file_list
-        self.insock = insock
+        self.insock = None
         self.isarmed = threading.Event()
         self.cmdsock = None
+        #open new dgram socket for sending commands and updates
         if cmdsock:
-            #open new unix dgram socket for sending commands
             self.cmdsock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
             self.cmdsock.connect(cmdsock)
+        elif cmdaddr:
+            addr_tuple = split_inet_addr(cmdaddr)
+            if addr_tuple:
+                self.cmdsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.cmdsock.connect(addr_tuple)
+        #start listening on a socket for incoming messages containing files to upload
+        if insock:
+            self.insock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.insock.bind(insock)
+        elif inport:
+            port = toInt(inport)
+            if port is not None:
+                self.insock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.insock.bind(("", port))
 
-    def __deinit__(self):
+    def __del__(self):
         if self.cmdsock:
             self.cmdsock.close()
+            self.cmdsock = None
+        if self.insock:
+            self.insock.close()
+            self.insock = None
+
+    def __enter__(self):
+        """
+        Including this function means you can use this class with the python
+        'with' statement, so internal objects are always cleaned up.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.__del__()
+
+    def set_upload_object(self, upload):
+        """
+        If the upload object can't be set at init time, it MUST be set here.
+        """
+        self.upload = upload
 
     def arm(self):
         """
@@ -207,17 +256,9 @@ class motionUploadManager(threading.Thread):
         data in the correct format indicating a number of segment files.
         When the connection is closed, the capture is deemed concluded.
         """
-        svr = None
-        port = toInt(self.insock)
-        if port is not None: #insock is actually a port number
-            svr = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            svr.bind(("", port))
-        else:
-            svr = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            svr.bind(self.insock)
         while True:
-            svr.listen(1)
-            conn, addr = svr.accept()
+            self.insock.listen(1)
+            conn, addr = self.insock.accept()
             while True:
                 data = conn.recv(1024)
                 if data:
@@ -225,19 +266,22 @@ class motionUploadManager(threading.Thread):
                     #parse and inspect JSON
                     js = json.loads(data.decode('utf-8'))
                     if "segment" in js:
-                        self.upload.add_file(js["segment"])
+                        if self.upload:
+                            self.upload.add_file(js["segment"])
                 else:
                     break
             print("recv data is None, close conn...")
             conn.close()
-            self.upload.add_capture_end()
+            if self.upload:
+                self.upload.add_capture_end()
 
     def read_and_upload(self, f):
         for fpath in f:
             fpath = fpath.strip()
             # forward the file to the server if we are armed
             if self.isarmed.is_set():
-                self.upload.add_file(fpath)
+                if self.upload:
+                    self.upload.add_file(fpath)
 
     def run(self):
         """
@@ -342,20 +386,13 @@ class cloudtalker():
     Links each separate module together: state receiving, state processing, file uploading.
     Regularly heartbeats with server to ensure state is correct and up to date.
     """
-    def __init__(self, motion_file_list=None, insock=None, cmdsock=None, state=state()):
+    def __init__(self, upload_mgr=None, state=state()):
         self.state = state
         self.upload = upload(ctalker=self)
-        if motion_file_list:
-            print("start motion upl mgr", motion_file_list)
-            self.motion_upload_mgr = motionUploadManager(self.upload,
-                motion_file_list=motion_file_list, cmdsock=cmdsock)
+        self.motion_upload_mgr = upload_mgr
+        if self.motion_upload_mgr:
+            self.motion_upload_mgr.set_upload_object(self.upload)
             self.motion_upload_mgr.start()
-        elif insock:
-            print("start motion upl mgr", insock)
-            self.motion_upload_mgr = motionUploadManager(self.upload, insock=insock, cmdsock=cmdsock)
-            self.motion_upload_mgr.start()
-        else:
-            self.motion_upload_mgr = None
 
     def __enter__(self):
         """
@@ -447,9 +484,13 @@ if __name__ == "__main__":
         parser.add_argument('--motion_file_list', default=None,
             help="File containing the list of files to upload (as motion-detected files)")
         parser.add_argument('--input_sock', default=None,
-            help="Input unix stream socket for reporting capture files")
+            help="Input unix stream socket for receiving capture files")
+        parser.add_argument('--input_port', default=None,
+            help="Input INet stream port for receiving capture files")
         parser.add_argument('--cam_sock', default=None,
             help="Unix dgram socket to send commands to (i.e. arm|disarm|capture, etc.)")
+        parser.add_argument('--cam_addr', default=None,
+            help="INet dgram ip:port address to send commands to (i.e. arm|disarm|capture, etc.)")
         return parser.parse_args()
 
     print("app started now")
@@ -458,9 +499,11 @@ if __name__ == "__main__":
     print(os.path.dirname(os.path.realpath(__file__)))
     print(os.getcwd())
 
-    with cloudtalker(motion_file_list=args.motion_file_list,
-            insock=args.input_sock, cmdsock=args.cam_sock) as ctalker:
-        ctalker.connect(args.endpoint, args.cert, args.key)
-        print("cloudConnect exited")
+    with motionUploadManager(motion_file_list=args.motion_file_list,
+            insock=args.input_sock, cmdsock=args.cam_sock,
+            inport=args.input_port, cmdaddr=args.cam_addr) as mgr:
+        with cloudtalker(upload_mgr=mgr) as ctalker:
+            ctalker.connect(args.endpoint, args.cert, args.key)
+            print("cloudConnect exited")
 
 
