@@ -178,6 +178,22 @@ class motionUploadManager(threading.Thread):
     """
     def __init__(self, upload=None, motion_file_list=None, insock=None, cmdsock=None,
             inport=None, cmdaddr=None):
+        """
+        Init the upload manager.
+
+        motion_file_list, insock, and inport arguments are all mutually-exclusive.
+        motion_file_list: a file ("-" for stdin, file path otherwise) containing a list
+        of files to upload to the server
+        insock: a path to a unix stream socket object (not yet created, that this object will
+        create) that will be listened to for connections containing filenames to upload.
+        inport: a port number to create an inet stream socket, similar to insock
+
+        cmdsock, and cmdaddr are mutually-exclusive.
+        cmdsock: a path to a unix datagram socket object (that has already been created)
+        that this object should send server commands to (i.e. arm, disarm, capture).
+        cmdaddr: an ip:port combination string to send datagram messages to, similar to
+        cmdsock.
+        """
         super(motionUploadManager, self).__init__()
         self.upload = upload
         self.motion_file_list = motion_file_list
@@ -219,6 +235,9 @@ class motionUploadManager(threading.Thread):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        """
+        Make doubly-sure the object destructor is called.
+        """
         self.__del__()
 
     def set_upload_object(self, upload):
@@ -252,8 +271,8 @@ class motionUploadManager(threading.Thread):
 
     def listensock(self):
         """
-        Open a listening UNIX socket and wait for a connection. Clients can send JSON
-        data in the correct format indicating a number of segment files.
+        Listen on an open socket and wait for a connection. Clients can send JSON
+        data in the correct format indicating each segment file in a capture.
         When the connection is closed, the capture is deemed concluded.
         """
         while True:
@@ -276,6 +295,10 @@ class motionUploadManager(threading.Thread):
                 self.upload.add_capture_end()
 
     def read_and_upload(self, f):
+        """
+        Read filenames from an input file. When the file is closed, the capture
+        is deemed concluded.
+        """
         for fpath in f:
             fpath = fpath.strip()
             # forward the file to the server if we are armed
@@ -387,6 +410,13 @@ class cloudtalker():
     Regularly heartbeats with server to ensure state is correct and up to date.
     """
     def __init__(self, upload_mgr=None, state=state()):
+        """
+        Create cloudtalker object.
+        upload_mgr: initialise with an upload manager, which will manage the uploading
+        of provided capture files to the cloud service (via the internal connection
+        created by this class). This will also forward received server messages to
+        a listening process if required.
+        """
         self.state = state
         self.upload = upload(ctalker=self)
         self.motion_upload_mgr = upload_mgr
@@ -484,11 +514,12 @@ if __name__ == "__main__":
         parser.add_argument('--motion_file_list', default=None,
             help="File containing the list of files to upload (as motion-detected files)")
         parser.add_argument('--input_sock', default=None,
-            help="Input unix stream socket for receiving capture files")
+            help="Input unix stream socket for receiving capture files (overwrites input_port)")
         parser.add_argument('--input_port', default=None,
             help="Input INet stream port for receiving capture files")
         parser.add_argument('--cam_sock', default=None,
-            help="Unix dgram socket to send commands to (i.e. arm|disarm|capture, etc.)")
+            help="Unix dgram socket to send commands to "
+            "(i.e. arm|disarm|capture, etc., overwrites cam_addr)")
         parser.add_argument('--cam_addr', default=None,
             help="INet dgram ip:port address to send commands to (i.e. arm|disarm|capture, etc.)")
         return parser.parse_args()
