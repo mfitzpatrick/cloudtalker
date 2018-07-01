@@ -1,0 +1,1 @@
+-e git://github.com/mfitzpatrick/websocket-client.git@fe65fee4d3d2917a6bc5570a9be0087860da6ef4#egg=websocket-client
