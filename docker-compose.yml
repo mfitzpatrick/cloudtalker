@@ -1,11 +1,23 @@
 version: "2"
 
 services:
-  python:
-    build: .
+  cloudtalker:
+    build:
+      context: ./src/cloudtalker/
+      dockerfile: Dockerfile
     ports:
      - "9000:9000"
+    # this command overrides the Dockerfile CMD line
+    command: ["python", "cloudtalker.py", "--input_port", "9000", "--cam_addr", "actuator:9001"]
 # if you wish to use unix sockets for communication, create your sockets in the
 # comm directory and uncomment these lines to share it
 #    volumes:
 #     - ./comm:/comm
+
+  actuator:
+    build:
+      context: ./src/actuator/
+      dockerfile: Dockerfile
+    ports:
+     - "9001:9001"
+
