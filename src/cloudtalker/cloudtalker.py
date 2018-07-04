@@ -88,7 +88,7 @@ class upload(threading.Thread):
             try:
                 #file data dict
                 fdata = self.inq.get(timeout=5)
-                if fdata["path"] is not None:
+                if "path" in fdata:
                     print("uploading file", fdata["path"])
                     if self.current_capts is not None and self.current_capts != fdata["ts"]:
                         #There may be a capture currently running. Since this file doesn't
@@ -103,8 +103,15 @@ class upload(threading.Thread):
                     if self.current_segno == 0:
                         self.init_capture()
                     self.upload_one_file(fdata["path"])
-                elif fdata["end_capture"] is not None:
+                elif "end_capture" in fdata:
                     self.end_capture()
+                elif "event" in fdata:
+                    if fdata["event"] == "alarm":
+                        toserver = {
+                            "type": "alarm",
+                            "trigger_timestamp": int(time.time()),
+                        }
+                        self.ctalker.send(json.dumps(toserver))
                 self.inq.task_done()
             except queue.Empty:
                 pass #continue through loop and wait again if necessary
@@ -153,7 +160,6 @@ class upload(threading.Thread):
                 "type": parsed[0],
                 "ts": parsed[1],
                 "segno": parsed[2],
-                "end_capture": None,
             }
             self.inq.put(fdata)
             print("upload module accepted file", fpath)
@@ -164,8 +170,17 @@ class upload(threading.Thread):
         This concludes the capture upload to the server.
         """
         fdata = {
-            "path": None,
             "end_capture": True,
+        }
+        self.inq.put(fdata)
+
+    def add_event(self, details_dict):
+        """
+        Add an event, other than a video upload, to be sent to the server.
+        Currently, the server only supports "alarm" events.
+        """
+        fdata = {
+            "event": details_dict["event"],
         }
         self.inq.put(fdata)
 
@@ -217,6 +232,7 @@ class motionUploadManager(threading.Thread):
             port = toInt(inport)
             if port is not None:
                 self.insock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.insock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 self.insock.bind(("", port))
 
     def __del__(self):
@@ -276,6 +292,7 @@ class motionUploadManager(threading.Thread):
         When the connection is closed, the capture is deemed concluded.
         """
         while True:
+            capture_end_required = False
             self.insock.listen(1)
             conn, addr = self.insock.accept()
             while True:
@@ -287,11 +304,15 @@ class motionUploadManager(threading.Thread):
                     if "segment" in js:
                         if self.upload:
                             self.upload.add_file(js["segment"])
+                            capture_end_required = True
+                    elif "event" in js:
+                        if self.upload:
+                            self.upload.add_event(js)
                 else:
                     break
             print("recv data is None, close conn...")
             conn.close()
-            if self.upload:
+            if self.upload and capture_end_required:
                 self.upload.add_capture_end()
 
     def read_and_upload(self, f):
