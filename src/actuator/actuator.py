@@ -20,8 +20,19 @@ class actuator(object):
     """
     This class acts as a simple actuator. It can be subclassed if required to give
     additional functionality.
+    The input and output pins passed in are Raspberry Pi GPIO pins that this class needs
+    to interact with. In response to calls to the activate() and deactivate() functions
+    this class will drive the output GPIO pin. In response to rising changes on the input
+    GPIO pin, this class will send an 'alarm' message to the cloud server.
     """
     def __init__(self, outputpin=None, inputpin=None, outaddr=None):
+        """
+        outputpin: GPIO pin to drive in response to activate() and deactivate() calls
+        inputpin: input GPIO pin. When driven high, this class will interrupt and send
+            an 'alarm' message to the cloud service
+        outaddr: inet stream socket to send the 'alarm' message to (if required).
+            NB: this MUST be in the form <host>:<port>
+        """
         self.ispi = True if 'RPi.GPIO' in sys.modules else False
         print("input pin", inputpin, type(inputpin))
         self.outputpin = toint(outputpin)
@@ -40,6 +51,12 @@ class actuator(object):
             gpio.add_event_detect(self.inputpin, gpio.RISING, callback=self.event, bouncetime=1000)
 
     def event(self, channel):
+        """
+        Interrupt handler callback function to handle a GPIO pin's interrupt event.
+        On receipt of this event, this function will send an 'alarm' message to
+        the cloud server.
+        This function can be overridden safely if required.
+        """
         print("rising edge detected on GPIO", channel)
         if self.addrtuple is not None:
             msg = {
@@ -52,12 +69,20 @@ class actuator(object):
             s.close()
 
     def activate(self):
+        """
+        Drives a GPIO pin ('outputpin' in the init args) high in response to the server command.
+        This function can be overridden safely if required.
+        """
         print("actuator activate")
         if self.ispi and self.outputpin:
             #set GPIO high
             gpio.output(self.outputpin, gpio.HIGH)
 
     def deactivate(self):
+        """
+        Drive a GPIO pin ('outputpin' in the init args) low in response to the server command.
+        This function can be overridden safely if required.
+        """
         print("actuator deactivate")
         if self.ispi and self.outputpin:
             #set GPIO low
@@ -105,6 +130,9 @@ class cmd_listener(object):
             self.insock = None
 
     def run(self):
+        """
+        Starts listening for incoming commands and routes them to the correct handler.
+        """
         if self.insock is None:
             print("cmd_listener should be run using the 'with' statment!")
             return
